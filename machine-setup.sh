@@ -4,6 +4,8 @@
 # Detects OS (macOS/Linux) and installs accordingly
 
 set -e  # Exit on error
+APT_UPDATED="false"
+INSTALL_ALIAS_TOOLS="true"
 
 # Colors for output
 RED='\033[0;31m'
@@ -29,6 +31,368 @@ print_error() {
     echo -e "${RED}✗${NC} $1"
 }
 
+usage() {
+    cat << 'EOF'
+Usage: ./machine-setup.sh [options]
+
+Options:
+  --install-tools   Install alias-related CLI tools (default)
+  --skip-tools      Skip alias-related CLI tool installation
+  -h, --help        Show this help message
+EOF
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --install-tools)
+                INSTALL_ALIAS_TOOLS="true"
+                ;;
+            --skip-tools)
+                INSTALL_ALIAS_TOOLS="false"
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                print_error "Unknown option: $1"
+                echo ""
+                usage
+                exit 1
+                ;;
+        esac
+        shift
+    done
+}
+
+csv_to_array() {
+    local csv="$1"
+    local -n out_array="$2"
+    out_array=()
+
+    if [[ -z "$csv" ]]; then
+        return
+    fi
+
+    IFS=',' read -r -a out_array <<< "$csv"
+}
+
+apt_update_once() {
+    if [[ "$APT_UPDATED" == "true" ]]; then
+        return
+    fi
+
+    sudo apt update
+    APT_UPDATED="true"
+}
+
+try_install_apt() {
+    local packages_csv="$1"
+    local packages=()
+    local pkg
+
+    csv_to_array "$packages_csv" packages
+
+    if [[ ${#packages[@]} -eq 0 ]]; then
+        return 1
+    fi
+
+    for pkg in "${packages[@]}"; do
+        if apt-cache show "$pkg" > /dev/null 2>&1; then
+            apt_update_once
+            if sudo apt install -y "$pkg"; then
+                return 0
+            fi
+        fi
+    done
+
+    return 1
+}
+
+try_install_dnf() {
+    local packages_csv="$1"
+    local packages=()
+    local pkg
+
+    csv_to_array "$packages_csv" packages
+
+    if [[ ${#packages[@]} -eq 0 ]]; then
+        return 1
+    fi
+
+    for pkg in "${packages[@]}"; do
+        if sudo dnf install -y "$pkg"; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+try_install_brew() {
+    local packages_csv="$1"
+    local packages=()
+    local pkg
+
+    csv_to_array "$packages_csv" packages
+
+    if [[ ${#packages[@]} -eq 0 ]]; then
+        return 1
+    fi
+
+    for pkg in "${packages[@]}"; do
+        if brew install "$pkg"; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+install_cli_tool() {
+    local binary_name="$1"
+    local tool_name="$2"
+    local brew_packages="$3"
+    local apt_packages="$4"
+    local dnf_packages="$5"
+
+    if command -v "$binary_name" > /dev/null 2>&1; then
+        print_warning "${tool_name} already installed"
+        return
+    fi
+
+    print_step "Installing ${tool_name}..."
+
+    if [[ "$OS" == "macos" ]]; then
+        if command -v brew > /dev/null 2>&1; then
+            if try_install_brew "$brew_packages"; then
+                print_success "${tool_name} installed"
+            else
+                print_warning "Could not install ${tool_name} via brew. Please install manually."
+            fi
+        else
+            print_warning "Homebrew not found. Skipping ${tool_name} install."
+        fi
+        return
+    fi
+
+    if command -v apt > /dev/null 2>&1; then
+        if try_install_apt "$apt_packages"; then
+            print_success "${tool_name} installed"
+            return
+        fi
+    fi
+
+    if command -v dnf > /dev/null 2>&1; then
+        if try_install_dnf "$dnf_packages"; then
+            print_success "${tool_name} installed"
+            return
+        fi
+    fi
+
+    print_warning "Could not auto-install ${tool_name}. Please install manually."
+}
+
+try_install_snap() {
+    local snap_name="$1"
+    local snap_flags="${2:-}"
+
+    if ! command -v snap > /dev/null 2>&1; then
+        return 1
+    fi
+
+    # shellcheck disable=SC2086
+    if sudo snap install $snap_flags "$snap_name"; then
+        return 0
+    fi
+
+    return 1
+}
+
+install_git() {
+    if command -v git > /dev/null 2>&1; then
+        print_warning "git already installed"
+        return
+    fi
+    print_step "Installing git..."
+    if [[ "$OS" == "macos" ]]; then
+        brew install git && print_success "git installed" || true
+    elif command -v apt > /dev/null 2>&1; then
+        apt_update_once && sudo apt install -y git && print_success "git installed"
+    elif command -v dnf > /dev/null 2>&1; then
+        sudo dnf install -y git && print_success "git installed"
+    fi
+}
+
+install_kubectl() {
+    if command -v kubectl > /dev/null 2>&1; then
+        print_warning "kubectl already installed"
+        return
+    fi
+    print_step "Installing kubectl..."
+    if [[ "$OS" == "macos" ]]; then
+        brew install kubectl && print_success "kubectl installed" && return
+    fi
+    # Try snap first (works on Ubuntu/Zorin out of the box)
+    if try_install_snap kubectl --classic; then
+        print_success "kubectl installed via snap"
+        return
+    fi
+    # Official binary install
+    local KUBE_VER
+    KUBE_VER="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
+    curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/${KUBE_VER}/bin/linux/amd64/kubectl"
+    chmod +x /tmp/kubectl
+    sudo mv /tmp/kubectl /usr/local/bin/kubectl
+    print_success "kubectl installed via official binary"
+}
+
+install_helm() {
+    if command -v helm > /dev/null 2>&1; then
+        print_warning "helm already installed"
+        return
+    fi
+    print_step "Installing helm..."
+    if [[ "$OS" == "macos" ]]; then
+        brew install helm && print_success "helm installed" && return
+    fi
+    if try_install_snap helm --classic; then
+        print_success "helm installed via snap"
+        return
+    fi
+    # Official install script
+    curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+    print_success "helm installed via official script"
+}
+
+install_terraform() {
+    if command -v terraform > /dev/null 2>&1; then
+        print_warning "terraform already installed"
+        return
+    fi
+    print_step "Installing terraform..."
+    if [[ "$OS" == "macos" ]]; then
+        brew tap hashicorp/tap
+        brew install hashicorp/tap/terraform && print_success "terraform installed" && return
+    fi
+    if try_install_snap terraform; then
+        print_success "terraform installed via snap"
+        return
+    fi
+    # HashiCorp apt repo
+    if command -v apt > /dev/null 2>&1; then
+        wget -qO- https://apt.releases.hashicorp.com/gpg \
+            | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
+https://apt.releases.hashicorp.com $(lsb_release -cs) main" \
+            | sudo tee /etc/apt/sources.list.d/hashicorp.list > /dev/null
+        APT_UPDATED="false"
+        apt_update_once
+        sudo apt install -y terraform
+        print_success "terraform installed via HashiCorp apt repo"
+        return
+    fi
+    if command -v dnf > /dev/null 2>&1; then
+        sudo dnf config-manager --add-repo \
+            https://rpm.releases.hashicorp.com/fedora/hashicorp.repo
+        sudo dnf install -y terraform
+        print_success "terraform installed via HashiCorp dnf repo"
+        return
+    fi
+    print_warning "Could not auto-install terraform. See https://developer.hashicorp.com/terraform/install"
+}
+
+install_ansible() {
+    if command -v ansible > /dev/null 2>&1; then
+        print_warning "ansible already installed"
+        return
+    fi
+    print_step "Installing ansible..."
+    if [[ "$OS" == "macos" ]]; then
+        brew install ansible && print_success "ansible installed" && return
+    fi
+    if command -v apt > /dev/null 2>&1; then
+        apt_update_once
+        sudo apt install -y ansible && print_success "ansible installed via apt" && return
+    fi
+    if command -v dnf > /dev/null 2>&1; then
+        sudo dnf install -y ansible && print_success "ansible installed via dnf" && return
+    fi
+    # pip fallback
+    if command -v pip3 > /dev/null 2>&1; then
+        pip3 install --user ansible && print_success "ansible installed via pip3" && return
+    fi
+    print_warning "Could not auto-install ansible. See https://docs.ansible.com/ansible/latest/installation_guide/"
+}
+
+install_docker() {
+    if command -v docker > /dev/null 2>&1; then
+        print_warning "docker already installed"
+    else
+        print_step "Installing docker..."
+        if [[ "$OS" == "macos" ]]; then
+            print_warning "Please install Docker Desktop for Mac: https://docs.docker.com/desktop/mac/install/"
+        else
+            # Official convenience script (works on Ubuntu, Debian, Zorin, Fedora, etc.)
+            curl -fsSL https://get.docker.com | sudo sh
+            sudo usermod -aG docker "$USER"
+            print_success "docker installed (re-login required for group membership)"
+        fi
+    fi
+
+    # Ensure docker compose plugin is available
+    if command -v docker > /dev/null 2>&1 && ! docker compose version > /dev/null 2>&1; then
+        print_step "Installing docker compose plugin..."
+        if [[ "$OS" == "macos" ]]; then
+            brew install docker-compose || true
+        elif command -v apt > /dev/null 2>&1; then
+            apt_update_once
+            sudo apt install -y docker-compose-plugin || true
+        elif command -v dnf > /dev/null 2>&1; then
+            sudo dnf install -y docker-compose-plugin || true
+        fi
+        print_success "docker compose plugin installed"
+    fi
+}
+
+install_kubectx() {
+    if command -v kubectx > /dev/null 2>&1; then
+        print_warning "kubectx already installed"
+        return
+    fi
+    print_step "Installing kubectx..."
+    if [[ "$OS" == "macos" ]]; then
+        brew install kubectx && print_success "kubectx installed" && return
+    fi
+    if try_install_snap kubectx --classic; then
+        print_success "kubectx installed via snap"
+        return
+    fi
+    # GitHub release binary
+    local KUBECTX_VER
+    KUBECTX_VER="$(curl -fsSL https://api.github.com/repos/ahmetb/kubectx/releases/latest \
+        | grep '"tag_name"' | cut -d'"' -f4)"
+    curl -fsSLo /tmp/kubectx.tar.gz \
+        "https://github.com/ahmetb/kubectx/releases/download/${KUBECTX_VER}/kubectx_${KUBECTX_VER}_linux_x86_64.tar.gz"
+    tar -xzf /tmp/kubectx.tar.gz -C /tmp kubectx
+    sudo mv /tmp/kubectx /usr/local/bin/kubectx
+    rm -f /tmp/kubectx.tar.gz
+    print_success "kubectx installed via GitHub release"
+}
+
+install_alias_tools() {
+    print_step "Installing tools used by aliases..."
+
+    install_git
+    install_kubectl
+    install_helm
+    install_terraform
+    install_ansible
+    install_docker
+    install_kubectx
+}
+
 # Detect OS
 detect_os() {
     if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -43,8 +407,23 @@ detect_os() {
     fi
 }
 
+# Detect if zsh is available
+detect_zsh() {
+    if command -v zsh > /dev/null 2>&1; then
+        HAS_ZSH="true"
+        print_success "Detected zsh"
+    else
+        HAS_ZSH="false"
+        print_warning "zsh not found. Skipping zsh/oh-my-zsh setup and configuring bash only."
+    fi
+}
+
 # Install oh-my-zsh
 install_ohmyzsh() {
+    if [[ "$HAS_ZSH" != "true" ]]; then
+        return
+    fi
+
     print_step "Installing oh-my-zsh..."
     
     if [[ -d "$HOME/.oh-my-zsh" ]]; then
@@ -57,6 +436,10 @@ install_ohmyzsh() {
 
 # Install oh-my-zsh plugins
 install_plugins() {
+    if [[ "$HAS_ZSH" != "true" ]]; then
+        return
+    fi
+
     print_step "Installing zsh plugins..."
     
     local ZSH_CUSTOM="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}"
@@ -238,6 +621,10 @@ backup_shell_rc() {
 
 # Configure .zshrc
 configure_zshrc() {
+    if [[ "$HAS_ZSH" != "true" ]]; then
+        return
+    fi
+
     print_step "Configuring .zshrc..."
     
     backup_shell_rc "$HOME/.zshrc"
@@ -490,17 +877,23 @@ EOF
 main() {
     echo -e "${GREEN}"
     echo "=========================================="
-    echo "  DevOps oh-my-zsh Setup Script"
+    echo "  DevOps Shell Setup Script"
     echo "=========================================="
     echo -e "${NC}"
     
     detect_os
+    detect_zsh
     
     print_step "Starting installation..."
     echo ""
     
     install_ohmyzsh
     install_plugins
+    if [[ "$INSTALL_ALIAS_TOOLS" == "true" ]]; then
+        install_alias_tools
+    else
+        print_warning "Skipping alias-related CLI tool installation (--skip-tools)"
+    fi
     install_eza
     install_nerd_font
     install_vivid
@@ -522,7 +915,9 @@ main() {
     fi
     echo ""
     echo "2. ${YELLOW}Restart your terminal or run:${NC}"
-    echo "   source ~/.zshrc   # if using zsh"
+    if [[ "$HAS_ZSH" == "true" ]]; then
+        echo "   source ~/.zshrc   # if using zsh"
+    fi
     echo "   source ~/.bashrc  # if using bash"
     echo ""
     echo "3. ${YELLOW}Test your setup:${NC}"
@@ -533,4 +928,5 @@ main() {
 }
 
 # Run main function
+parse_args "$@"
 main
