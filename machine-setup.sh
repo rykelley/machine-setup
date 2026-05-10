@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# DevOps oh-my-zsh Setup Script
+# DevOps shell setup script (zsh + bash)
 # Detects OS (macOS/Linux) and installs accordingly
 
 set -e  # Exit on error
@@ -225,12 +225,14 @@ install_vivid_cargo() {
     fi
 }
 
-# Backup existing .zshrc
-backup_zshrc() {
-    if [[ -f "$HOME/.zshrc" ]]; then
-        local BACKUP="$HOME/.zshrc.backup.$(date +%Y%m%d_%H%M%S)"
-        cp "$HOME/.zshrc" "$BACKUP"
-        print_success "Backed up existing .zshrc to $BACKUP"
+# Backup existing shell config
+backup_shell_rc() {
+    local rc_file="$1"
+
+    if [[ -f "$rc_file" ]]; then
+        local BACKUP="${rc_file}.backup.$(date +%Y%m%d_%H%M%S)"
+        cp "$rc_file" "$BACKUP"
+        print_success "Backed up existing ${rc_file##*/} to $BACKUP"
     fi
 }
 
@@ -238,7 +240,7 @@ backup_zshrc() {
 configure_zshrc() {
     print_step "Configuring .zshrc..."
     
-    backup_zshrc
+    backup_shell_rc "$HOME/.zshrc"
     
     # Create new .zshrc content
     cat > "$HOME/.zshrc" << 'EOF'
@@ -378,6 +380,112 @@ EOF
     print_success ".zshrc configured"
 }
 
+# Configure .bashrc
+configure_bashrc() {
+    print_step "Configuring .bashrc..."
+
+    backup_shell_rc "$HOME/.bashrc"
+
+    cat > "$HOME/.bashrc" << 'EOF'
+# ==========================================
+# DevOps shell configuration (bash)
+# ==========================================
+
+# History settings
+HISTSIZE=50000
+HISTFILESIZE=50000
+HISTCONTROL=ignoredups:erasedups
+shopt -s histappend
+
+# Better directory navigation
+shopt -s autocd
+shopt -s cdspell
+
+# ==========================================
+# eza (modern ls replacement)
+# ==========================================
+
+if command -v eza > /dev/null 2>&1; then
+    alias ls='eza --icons --group-directories-first'
+    alias ll='eza -lh --icons --group-directories-first --git'
+    alias la='eza -lah --icons --group-directories-first --git'
+    alias lt='eza --tree --level=2 --icons --git-ignore'
+    alias llt='eza -lh --tree --level=2 --icons --git-ignore'
+    alias tree='eza --tree --git-ignore --icons'
+    alias tree2='eza --tree --level=2 --git-ignore --icons'
+    alias tree3='eza --tree --level=3 --git-ignore --icons'
+fi
+
+# ==========================================
+# DevOps aliases
+# ==========================================
+
+# Kubernetes
+alias k='kubectl'
+alias kgp='kubectl get pods'
+alias kgpa='kubectl get pods -A'
+alias kgn='kubectl get nodes'
+alias kgs='kubectl get svc'
+alias kgd='kubectl get deployments'
+alias kns='kubectl config set-context --current --namespace'
+alias kctx='kubectx'
+
+# Helm
+alias h='helm'
+alias hls='helm list'
+alias hlsa='helm list -A'
+
+# Terraform
+alias tf='terraform'
+alias tfi='terraform init'
+alias tfp='terraform plan'
+alias tfa='terraform apply'
+alias tfd='terraform destroy'
+
+# Ansible
+alias a='ansible'
+alias ap='ansible-playbook'
+alias av='ansible-vault'
+
+# Docker
+alias d='docker'
+alias dc='docker compose'
+alias dps='docker ps'
+alias dpsa='docker ps -a'
+alias di='docker images'
+
+# Git shortcuts
+alias gst='git status'
+alias gco='git checkout'
+alias gcb='git checkout -b'
+alias gpl='git pull'
+alias gps='git push'
+alias gcm='git commit -m'
+alias gaa='git add .'
+
+# ==========================================
+# Colors (vivid or dircolors)
+# ==========================================
+
+if command -v vivid > /dev/null 2>&1; then
+    export LS_COLORS="$(vivid generate molokai)"
+elif command -v dircolors > /dev/null 2>&1; then
+    eval "$(dircolors -b)"
+fi
+
+# ==========================================
+# Kubernetes completion
+# ==========================================
+
+if command -v kubectl > /dev/null 2>&1; then
+    source <(kubectl completion bash)
+    complete -o default -F __start_kubectl k
+fi
+EOF
+
+    print_success ".bashrc configured"
+}
+
 # Main installation flow
 main() {
     echo -e "${GREEN}"
@@ -397,6 +505,7 @@ main() {
     install_nerd_font
     install_vivid
     configure_zshrc
+    configure_bashrc
     
     echo ""
     echo -e "${GREEN}=========================================="
@@ -413,12 +522,13 @@ main() {
     fi
     echo ""
     echo "2. ${YELLOW}Restart your terminal or run:${NC}"
-    echo "   source ~/.zshrc"
+    echo "   source ~/.zshrc   # if using zsh"
+    echo "   source ~/.bashrc  # if using bash"
     echo ""
     echo "3. ${YELLOW}Test your setup:${NC}"
     echo "   ll"
     echo ""
-    echo "Your old .zshrc was backed up with timestamp"
+    echo "Your old shell config files were backed up with timestamps"
     echo ""
 }
 
